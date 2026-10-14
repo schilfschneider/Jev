@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+data/cache/
+data/*.json
+data/*.csv
+data/*.xlsx
+!data/README.md
+.env
