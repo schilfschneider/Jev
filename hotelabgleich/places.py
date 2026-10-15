@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import requests
@@ -21,9 +21,29 @@ SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 API_KEY_ENV = "GOOGLE_MAPS_API_KEY"
 MAX_RESULTS_PER_QUERY = 60
 
-# Rechteck (Süd, West, Nord, Ost), großzügig um die Landesgrenze gelegt.
+# Rechteck (Süd, West, Nord, Ost), großzügig um die Landesgrenze gelegt. Überlappungen sind gewollt:
+# Treffer werden über die Google-Adresse (administrative_area_level_1) dem Bundesland zugeordnet.
 BUNDESLAENDER = {
+    "Burgenland": (46.83, 15.99, 48.12, 17.17),
+    "Kärnten": (46.37, 12.65, 47.13, 15.07),
+    "Niederösterreich": (47.42, 14.45, 49.02, 17.07),
+    "Oberösterreich": (47.46, 12.73, 48.78, 14.99),
     "Salzburg": (46.93, 12.07, 48.06, 14.00),
+    "Steiermark": (46.61, 13.56, 47.83, 16.17),
+    "Tirol": (46.62, 10.10, 47.75, 12.97),
+    "Vorarlberg": (46.84, 9.53, 47.60, 10.24),
+    "Wien": (48.11, 16.18, 48.33, 16.58),
+}
+
+# Ausstattungsmerkmale, die die Places API (New) für Beherbergungsbetriebe liefern kann.
+# Diese Felder fallen in die höchste Preisstufe (Enterprise + Atmosphere).
+AMENITY_FIELDS = ["allowsDogs", "goodForChildren", "servesBreakfast", "parkingOptions", "accessibilityOptions"]
+AMENITY_LABELS = {
+    "allowsDogs": "Hunde erlaubt",
+    "goodForChildren": "Kinderfreundlich",
+    "servesBreakfast": "Frühstück",
+    "parkingOptions": "Parkplatz",
+    "accessibilityOptions": "Barrierefrei",
 }
 
 FIELD_MASK = ",".join(
@@ -41,6 +61,7 @@ FIELD_MASK = ",".join(
         "places.types",
         "places.businessStatus",
         "places.googleMapsUri",
+        *(f"places.{f}" for f in AMENITY_FIELDS),
         "nextPageToken",
     ]
 )
@@ -64,6 +85,7 @@ class GoogleHotel:
     typ: str
     status: str
     maps_url: str
+    ausstattung: list[str] = field(default_factory=list)
 
     @classmethod
     def from_api(cls, p: dict) -> "GoogleHotel":
@@ -90,7 +112,18 @@ class GoogleHotel:
             typ=p.get("primaryType", ""),
             status=p.get("businessStatus", ""),
             maps_url=p.get("googleMapsUri", ""),
+            ausstattung=amenities(p),
         )
+
+
+def amenities(p: dict) -> list[str]:
+    out = []
+    for f in AMENITY_FIELDS:
+        v = p.get(f)
+        # parkingOptions/accessibilityOptions sind Objekte mit Einzel-Flags; ein wahres Flag genügt.
+        if v is True or (isinstance(v, dict) and any(v.values())):
+            out.append(AMENITY_LABELS[f])
+    return out
 
 
 class PlacesClient:

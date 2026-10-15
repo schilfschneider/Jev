@@ -100,6 +100,11 @@ def decide_by_rules(hotel: GoogleHotel, cands: list[Candidate]) -> Result:
         return Result(hotel, "Mitglied", best.member, f"Name {best.name_exact:.0f} % + Lage", kandidaten=cands)
     if all(c.name_score < 50 for c in cands):
         return Result(hotel, "kein Mitglied", methode="Namen in der Umgebung abweichend", kandidaten=cands)
+    # Eigene Website, und jeder namensähnliche Kandidat hat eine andere: verschiedene Betriebe.
+    hdom = domain(hotel.website)
+    similar = [c for c in cands if c.name_score >= 50]
+    if hdom and all(domain(c.member.website) and c.name_exact < 90 for c in similar):
+        return Result(hotel, "kein Mitglied", methode="Website abweichend", kandidaten=cands)
     return Result(hotel, "prüfen", best.member, "Regeln nicht eindeutig", kandidaten=cands)
 
 

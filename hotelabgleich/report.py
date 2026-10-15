@@ -113,7 +113,8 @@ def write(results: list[Result], members_total: int, bundesland: str, path: Path
         "1. Google Places API (Text Search, Typ „lodging“, Suchbegriff „Hotel“): Das Bundesland wird in Kacheln zerlegt, "
         "volle Kacheln (60 Treffer) werden geviertelt. Nur Einträge mit Bundesland laut Google-Adresse, ohne dauerhaft geschlossene.",
         "2. Mitgliederliste: Hotelseiten von meinhotel.at (strukturierte Daten) bzw. CSV-Export der Mitgliederverwaltung.",
-        "3. Zuordnung per Regel: gleiche Website-Domain, oder Namensähnlichkeit ≥ 90 % bei gleicher PLZ bzw. < 500 m Entfernung.",
+        "3. Zuordnung per Regel: gleiche Website-Domain, oder Namensähnlichkeit ≥ 90 % bei gleicher PLZ bzw. < 500 m Entfernung. "
+        "Kein Mitglied, wenn alle namensähnlichen Mitglieder in der Nähe eine andere Website haben.",
         f"4. Unklare Fälle: TypeSafe-Modell Jev beurteilt je Kandidat, ob es derselbe Betrieb ist (Mitglied ab {NOUL_MATCH:.0%}, "
         f"ausgeschlossen unter {NOUL_NO_MATCH:.0%}, dazwischen manuelle Prüfung).",
         "",
@@ -126,6 +127,107 @@ def write(results: list[Result], members_total: int, bundesland: str, path: Path
     for i, t in enumerate(text, 1):
         cell = m.cell(i, 1, t)
         cell.font = Font(name="Arial", bold=t in ("Methodik", "Einschränkungen"), color=BLAU if t in ("Methodik", "Einschränkungen") else None)
+        cell.alignment = Alignment(wrap_text=True)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+
+
+# --- Ranking-Bericht (Gästescore) -----------------------------------------------------------------
+
+RANK_COLUMNS = [
+    ("Rang", 7), ("Rang Bundesland", 9), ("Betrieb", 38), ("Bundesland", 16), ("Bezirk", 18), ("PLZ", 7),
+    ("Ort", 20), ("Typ", 14), ("Sterne", 7), ("ÖHV-Gästescore", 10), ("Klasse", 13), ("Vertrauen", 10),
+    ("Perzentil", 9), ("Google", 8), ("Google Bew.", 10), ("Booking", 8), ("Booking Bew.", 10),
+    ("Abweichung Google/Booking", 12), ("ÖHV-Status", 14), ("ÖHV-Mitglied (Treffer)", 32), ("Ausstattung", 40),
+]
+
+
+def _head(ws, row: int, titles: list[str]) -> None:
+    for c, t in enumerate(titles, 1):
+        cell = ws.cell(row, c, t)
+        cell.font, cell.fill = HEAD_FONT, HEAD_FILL
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+
+
+def write_ranking(hotels, cmp: dict, path: Path, quellen: str) -> None:
+    from .scoring import KLASSEN, PRIOR_REVIEWS
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Vergleich"
+    ws["A1"] = "ÖHV-Gästescore: Mitglieder im Vergleich"
+    ws["A1"].font = TITLE_FONT
+    ws["A2"] = f"Stand {date.today():%d.%m.%Y} · Quellen: {quellen}"
+    ws["A2"].font = Font(name="Arial", italic=True, size=9)
+    for col, w in zip("ABCDEFGH", (28, 12, 12, 12, 12, 12, 12, 12)):
+        ws.column_dimensions[col].width = w
+
+    titles = ["Gruppe", "Mitglieder n", "Ø Mitglieder", "Andere n", "Ø Andere", "Differenz", "p-Wert"]
+    row = 4
+
+    def block(title: str, groups: dict) -> None:
+        nonlocal row
+        ws.cell(row, 1, title).font = Font(name="Arial", bold=True, color=BLAU)
+        row += 1
+        _head(ws, row, titles)
+        for name, g in groups.items():
+            row += 1
+            vals = [name, g["mitglieder"]["n"], g["mitglieder"]["mittel"], g["andere"]["n"], g["andere"]["mittel"],
+                    g["differenz"], None if g["p_wert"] is None else round(g["p_wert"], 4)]
+            for c, v in enumerate(vals, 1):
+                ws.cell(row, c, v).font = BODY_FONT
+        row += 2
+
+    block("Gesamt", {"Alle Betriebe": cmp["gesamt"]})
+    ws.cell(row, 1, "Strukturbereinigte Differenz (gleiches Bundesland, Sterne, Größe)").font = BODY_FONT
+    ws.cell(row, 2, cmp["bereinigt"]["differenz"]).font = Font(name="Arial", bold=True, color=BLAU)
+    ws.cell(row + 1, 1, "Mitgliedsanteil gesamt / Top 10 % / Flop 10 % (in %)").font = BODY_FONT
+    for c, k in enumerate(("mitglieder_gesamt", "mitglieder_top10", "mitglieder_flop10"), 2):
+        ws.cell(row + 1, c, cmp["anteile"][k]).font = BODY_FONT
+    row += 3
+    block("Nach Bundesland", cmp["bundesland"])
+    block("Nach Sternen", cmp["sterne"])
+    block("Nach Größe (Anzahl Bewertungen)", cmp["groesse"])
+
+    rk = wb.create_sheet("Ranking")
+    _head(rk, 1, [t for t, _ in RANK_COLUMNS])
+    for c, (_, w) in enumerate(RANK_COLUMNS, 1):
+        rk.column_dimensions[get_column_letter(c)].width = w
+    scored = sorted((h for h in hotels if h.score is not None), key=lambda h: h.rang_gesamt)
+    for i, h in enumerate(scored, 2):
+        vals = [h.rang_gesamt, h.rang_bundesland, h.name, h.bundesland, h.bezirk, h.plz, h.ort, h.typ, h.sterne,
+                h.score, h.klasse, h.vertrauen, h.perzentil, h.google_bewertung, h.google_anzahl or None,
+                h.booking_bewertung, h.booking_anzahl or None, h.abweichung_quellen, h.mitglied_status,
+                h.mitglied_name, ", ".join(h.ausstattung)]
+        for c, v in enumerate(vals, 1):
+            cell = rk.cell(i, c, v)
+            cell.font = BODY_FONT
+            if h.ist_mitglied:
+                cell.fill = STATUS_FILL["Mitglied"]
+    rk.freeze_panes = "D2"
+    rk.auto_filter.ref = rk.dimensions
+
+    m = wb.create_sheet("Methodik")
+    m.column_dimensions["A"].width = 120
+    text = [
+        "Methodik ÖHV-Gästescore",
+        "1. Normierung auf 0–100: Google (1–5 Sterne) → (x − 1) / 4 · 100; Booking.com (Note 1–10) → (x − 1) / 9 · 100.",
+        f"2. Glättung je Quelle (Bayes-Mittel) mit {PRIOR_REVIEWS} fiktiven Durchschnittsbewertungen: wenige Bewertungen ziehen zum Durchschnitt.",
+        "3. Gesamtscore: gewichteter Mittelwert der Quellen, Gewicht = 50 % · n / (n + Prior) je Quelle.",
+        "4. Klassen: " + ", ".join(f"{label} ab {limit}" for limit, label in KLASSEN) + ". Vertrauen: hoch ab 200, mittel ab 50 Bewertungen.",
+        "5. Vergleich: Mitglieder vs. Nicht-Mitglieder (ohne „prüfen“), Mann-Whitney-U-Test; strukturbereinigt innerhalb gleicher Zellen "
+        "aus Bundesland × Sterne × Größenklasse, gewichtet nach Mitgliederzahl je Zelle.",
+        "",
+        "Einschränkungen",
+        "• Zusammenhang ist kein Kausalbeleg: Ein höherer Score der Mitglieder zeigt nicht, dass die Mitgliedschaft ihn bewirkt.",
+        "• Sterne laut Booking.com (teils Selbstangabe); offizielle Klassifizierung in Österreich: WKO/Hotelstars Union.",
+        "• Google- und Booking-Inhalte unterliegen den Plattformbedingungen: nur interne Auswertung, regelmäßig neu abrufen.",
+    ]
+    for i, t in enumerate(text, 1):
+        bold = t in ("Methodik ÖHV-Gästescore", "Einschränkungen")
+        cell = m.cell(i, 1, t)
+        cell.font = Font(name="Arial", bold=bold, color=BLAU if bold else None)
         cell.alignment = Alignment(wrap_text=True)
 
     path.parent.mkdir(parents=True, exist_ok=True)
